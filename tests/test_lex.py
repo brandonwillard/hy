@@ -37,13 +37,14 @@ def test_lex_single_quote_err():
     with lexe() as execinfo:
         tokenize("' ")
 
-    expected = ['  File "<string>", line -1\n',
+    expected = ['  File "<string>", line 1\n',
                 "    '\n",
                 '    ^\n',
                 'LexException: Could not identify the next token.\n']
-    output = traceback.format_exception_only(execinfo.type, execinfo.value)
+    output = traceback.format_exception(execinfo.type, execinfo.value,
+                                        execinfo.tb)
 
-    assert output[:-1:1] == expected[:-1:1]
+    assert output[-4:-1:] == expected[:-1:]
     # Python 2.7 doesn't give the full exception name, so we compensate.
     assert output[-1].endswith(expected[-1])
 
@@ -481,7 +482,7 @@ def test_lex_exception_filtering(capsys):
 
     # First, test for PrematureEndOfInput
     with peoi() as execinfo:
-        tokenize(" \n (foo")
+        tokenize(" \n (foo\n       \n")
 
     expected = ['  File "<string>", line 2',
                 '    (foo',

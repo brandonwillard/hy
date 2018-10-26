@@ -49,6 +49,7 @@ def macro(name):
     name = mangle(name)
     def _(fn):
         fn.__name__ = '({})'.format(name)
+        fn.__macro__ = True
         try:
             fn._hy_macro_pass_compiler = has_kwargs(fn)
         except Exception:
@@ -74,6 +75,7 @@ def tag(name):
             _name = _name.encode('UTF-8')
 
         fn.__name__ = _name
+        fn.__tag__ = True
 
         module = inspect.getmodule(fn)
 
@@ -120,7 +122,7 @@ def _same_modules(source_module, target_module):
             source_filename == target_filename)
 
 
-def require(source_module, target_module, assignments, prefix=""):
+def require(source_module, target_module, assignments):
     """Load macros from one module into the namespace of another.
 
     This function is called from the `require` special form in the compiler.
@@ -137,11 +139,6 @@ def require(source_module, target_module, assignments, prefix=""):
 
     assignments: str or list of tuples of strs
         The string "ALL" or a list of macro name and alias pairs.
-
-    prefix: str, optional ("")
-        If nonempty, its value is prepended to the name of each imported macro.
-        This allows one to emulate namespaced macros, like
-        "mymacromodule.mymacro", which looks like an attribute of a module.
 
     Returns
     -------
@@ -186,15 +183,19 @@ def require(source_module, target_module, assignments, prefix=""):
     target_macros = target_namespace.setdefault('__macros__', {})
     target_tags = target_namespace.setdefault('__tags__', {})
 
-    if prefix:
-        prefix += "."
-
     if assignments == "ALL":
         # Only add macros/tags created in/by the source module.
-        name_assigns = [(n, n) for n, f in source_macros.items()
+        name_assigns = [(n, n) for n, f in source_tags.items()
                         if inspect.getmodule(f) == source_module]
-        name_assigns += [(n, n) for n, f in source_tags.items()
-                         if inspect.getmodule(f) == source_module]
+
+        # Effectively import the module, so that standard Python
+        # fully qualified names work for macros and tags.
+        if source_module.__package__:
+            parent_mod_name = source_module.__package__.split('.')[0]
+            parent_module = importlib.import_module(parent_mod_name)
+            target_namespace[parent_mod_name] = parent_module
+        else:
+            target_namespace[source_module.__name__] = source_module
     else:
         # If one specifically requests a macro/tag not created in the source
         # module, I guess we allow it?
@@ -202,11 +203,14 @@ def require(source_module, target_module, assignments, prefix=""):
 
     for name, alias in name_assigns:
         _name = mangle(name)
-        alias = mangle(prefix + alias)
+        _alias = mangle(alias)
+
         if _name in source_module.__macros__:
-            target_macros[alias] = source_macros[_name]
+            target_macros[_alias] = source_macros[_name]
+            if assignments != 'ALL':
+                target_namespace[_alias] = source_macros[_name]
         elif _name in source_module.__tags__:
-            target_tags[alias] = source_tags[_name]
+            target_tags[_alias] = source_tags[_name]
         else:
             raise ImportError('Could not require name {} from {}'.format(
                 _name, source_module))
@@ -233,13 +237,15 @@ def load_macros(module):
 
         # Make sure we don't overwrite macros in the module.
         if hasattr(builtin_mod, '__macros__'):
-            module_macros.update({k: v
-                                  for k, v in builtin_mod.__macros__.items()
-                                  if k not in module_macros})
+            for k, v in builtin_mod.__macros__.items():
+                if k not in module_macros:
+                    module_macros[k] = v
+                    module.__dict__[k] = v
+
         if hasattr(builtin_mod, '__tags__'):
-            module_tags.update({k: v
-                                for k, v in builtin_mod.__tags__.items()
-                                if k not in module_tags})
+            for k, v in builtin_mod.__tags__.items():
+                if k not in module_tags:
+                    module_tags[k] = v
 
 
 def make_empty_fn_copy(fn):
@@ -312,14 +318,15 @@ def macroexpand(tree, module, compiler=None, once=False):
 
         fn = mangle(fn)
         expr_modules = (([] if not hasattr(tree, 'module') else [tree.module])
-            + [module])
+                        + [module])
 
         # Choose the first namespace with the macro.
-        m = next((mod.__macros__[fn]
+        m = next((mod.__dict__[fn]
                   for mod in expr_modules
-                  if fn in mod.__macros__),
+                  if fn in mod.__dict__),
                  None)
-        if not m:
+
+        if not getattr(m, '__macro__', False):
             break
 
         opts = {}
@@ -371,7 +378,7 @@ def tag_macroexpand(tag, tree, module):
         module = importlib.import_module(module)
 
     expr_modules = (([] if not hasattr(tree, 'module') else [tree.module])
-        + [module])
+                    + [module])
 
     # Choose the first namespace with the macro.
     tag_macro = next((mod.__tags__[tag]
@@ -379,7 +386,7 @@ def tag_macroexpand(tag, tree, module):
                       if tag in mod.__tags__),
                      None)
 
-    if tag_macro is None:
+    if not getattr(tag_macro, '__tag__', False):
         raise HyTypeError(tag, "'{0}' is not a defined tag macro.".format(tag))
 
     expr = tag_macro(tree)

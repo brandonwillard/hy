@@ -66,7 +66,8 @@ class HyREPL(code.InteractiveConsole, object):
         self.locals = self.module.__dict__
 
         # Load cmdline-specific macros.
-        require('hy.cmdline', module_name, assignments='ALL')
+        global koan_macro, ideas_macro
+        self.locals.update({'koan': koan_macro, 'ideas': ideas_macro})
 
         self.spy = spy
 
@@ -209,9 +210,14 @@ def pretty_error(func, *args, **kw):
 
 
 def run_command(source):
+    global koan_macro, ideas_macro
+
+    __main__ = importlib.import_module('__main__')
+    __main__.__dict__.update({'koan': koan_macro, 'ideas': ideas_macro})
+
     tree = hy_parse(source)
-    require("hy.cmdline", "__main__", assignments="ALL")
-    pretty_error(hy_eval, tree, None, importlib.import_module('__main__'))
+    pretty_error(hy_eval, tree, None, __main__)
+
     return 0
 
 

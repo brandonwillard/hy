@@ -1165,8 +1165,7 @@ class HyASTCompiler(object):
                 ret += node(
                     expr, module=module or None, names=names, level=level)
 
-            elif require(ast_module, self.module, assignments=assignments,
-                         prefix=prefix):
+            elif require(ast_module, self.module, assignments=assignments):
                 # Actually calling `require` is necessary for macro expansions
                 # occurring during compilation.
                 self.imports['hy.macros'].update([None])
@@ -1179,8 +1178,7 @@ class HyASTCompiler(object):
                     HyKeyword('assignments'),
                     (HyString("ALL") if assignments == "ALL" else
                         [[HyString(k), HyString(v)] for k, v in assignments]),
-                    HyKeyword('prefix'),
-                    HyString(prefix)]).replace(expr))
+                ]).replace(expr))
 
         return ret
 

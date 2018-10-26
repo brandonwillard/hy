@@ -13,7 +13,7 @@ from hy.compiler import HyASTCompiler
 import pytest
 
 
-@macro("test")
+@macro("tmac")
 def tmac(ETname, *tree):
     """ Turn an expression into a list """
     return HyList(tree)
@@ -21,7 +21,7 @@ def tmac(ETname, *tree):
 
 def test_preprocessor_simple():
     """ Test basic macro expansion """
-    obj = macroexpand(tokenize('(test "one" "two")')[0],
+    obj = macroexpand(tokenize('(tmac "one" "two")')[0],
                       __name__,
                       HyASTCompiler(__name__))
     assert obj == HyList(["one", "two"])
@@ -30,14 +30,14 @@ def test_preprocessor_simple():
 
 def test_preprocessor_expression():
     """ Test that macro expansion doesn't recurse"""
-    obj = macroexpand(tokenize('(test (test "one" "two"))')[0],
+    obj = macroexpand(tokenize('(tmac (tmac "one" "two"))')[0],
                       __name__,
                       HyASTCompiler(__name__))
 
     assert type(obj) == HyList
     assert type(obj[0]) == HyExpression
 
-    assert obj[0] == HyExpression([HySymbol("test"),
+    assert obj[0] == HyExpression([HySymbol("tmac"),
                                    HyString("one"),
                                    HyString("two")])
 

@@ -1,8 +1,10 @@
 # Copyright 2018 the authors.
 # This file is part of Hy, which is free software licensed under the Expat
 # license. See the LICENSE.
-
 from __future__ import unicode_literals
+
+import os
+
 from contextlib import contextmanager
 from math import isnan, isinf
 from hy._compat import PY3, str_type, bytes_type, long_type, string_types
@@ -11,6 +13,12 @@ from clint.textui import colored
 
 
 PRETTY = True
+_hy_colored_ast_objects = False
+
+
+def colored_ast_objects():
+    global _hy_colored_ast_objects
+    return os.environ.get('HY_COLORED_AST_OBJECTS', _hy_colored_ast_objects)
 
 
 @contextmanager
@@ -272,7 +280,7 @@ class HySequence(HyObject, list):
 
     def __str__(self):
         with pretty():
-            c = self.color
+            c = self.color if colored_ast_objects() else str
             if self:
                 return ("{}{}\n  {}{}").format(
                     c(self.__class__.__name__),
@@ -298,10 +306,11 @@ class HyDict(HySequence):
     """
     HyDict (just a representation of a dict)
     """
+    color = staticmethod(colored.green)
 
     def __str__(self):
         with pretty():
-            g = colored.green
+            g = self.color if colored_ast_objects() else str
             if self:
                 pairs = []
                 for k, v in zip(self[::2],self[1::2]):

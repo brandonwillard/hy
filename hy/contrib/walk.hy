@@ -276,12 +276,12 @@ Replaces symbols in body, but only where it would be a valid let binding.
 The bindings pairs the target symbol and the expansion form for that symbol.
 "
   (if (odd? (len bindings))
-      (macro-error bindings "bindings must be paired"))
+      (macro-error "bindings must be paired" bindings))
   (for [k (cut bindings None None 2)]
     (if-not (symbol? k)
-            (macro-error k "bind targets must be symbols")
+            (macro-error "bind targets must be symbols" k)
             (if (in '. k)
-                (macro-error k "binding target may not contain a dot"))))
+                (macro-error "binding target may not contain a dot" k))))
   (setv bindings (dict (partition bindings))
         body (macroexpand-all body (or module-name (calling-module-name))))
   (symbolexpand `(do ~@body)
@@ -309,7 +309,7 @@ Function arguments can shadow let bindings in their body,
 as can nested let forms.
 "
   (if (odd? (len bindings))
-      (macro-error bindings "let bindings must be paired"))
+      (macro-error "let bindings must be paired" bindings))
   (setv g!let (gensym 'let)
         replacements (OrderedDict)
         keys []
@@ -318,9 +318,9 @@ as can nested let forms.
     (.get replacements symbol symbol))
   (for [[k v] (partition bindings)]
     (if-not (symbol? k)
-            (macro-error k "bind targets must be symbols")
+            (macro-error "bind targets must be symbols" k)
             (if (in '. k)
-                (macro-error k "binding target may not contain a dot")))
+                (macro-error "binding target may not contain a dot" k)))
     (.append values (symbolexpand (macroexpand-all v &name)
                                   expander))
     (.append keys `(get ~g!let ~(name k)))

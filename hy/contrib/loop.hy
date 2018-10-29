@@ -46,7 +46,7 @@
 
 (defmacro defnr [name lambda-list &rest body]
   (if (not (= (type name) HySymbol))
-    (macro-error name "defnr takes a name as first argument"))
+    (macro-error "defnr takes a name as first argument" name))
   `(do (require hy.contrib.loop)
        (setv ~name (hy.contrib.loop.fnr ~lambda-list ~@body))))
 

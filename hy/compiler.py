@@ -9,20 +9,21 @@ from hy.models import (HyObject, HyExpression, HyKeyword, HyInteger, HyComplex,
 from hy.model_patterns import (FORM, SYM, KEYWORD, STR, sym, brackets, whole,
                                notpexpr, dolike, pexpr, times, Tag, tag, unpack)
 from funcparserlib.parser import some, many, oneplus, maybe, NoParseError
-from hy.errors import HyCompileError, HyTypeError
+from hy.errors import (HyCompileError, HyTypeError, HyEvalError,
+                       HyInternalError)
 
 from hy.lex import mangle, unmangle
 
-from hy._compat import (str_type, string_types, bytes_type, long_type, PY3,
-                        PY35, raise_empty)
+from hy._compat import (string_types, str_type, bytes_type, long_type, PY3,
+                        PY35, reraise)
 from hy.macros import require, load_macros, macroexpand, tag_macroexpand
 
 import hy.core
 
+import pkgutil
 import traceback
 import importlib
 import inspect
-import pkgutil
 import types
 import ast
 import sys
@@ -340,22 +341,33 @@ def is_unpack(kind, x):
 class HyASTCompiler(object):
     """A Hy-to-Python AST compiler"""
 
-    def __init__(self, module):
+    def __init__(self, module, filename=None, source=None):
         """
         Parameters
         ----------
         module: str or types.ModuleType
-            Module in which the Hy tree is evaluated.
+            Module name or object in which the Hy tree is evaluated.
+        filename: str, optional
+            The name of the file for the source to be compiled.
+            This is optional information for informative error messages and
+            debugging.
+        source: str, optional
+            The source for the file, if any, being compiled.  This is optional
+            information for informative error messages and debugging.
         """
         self.anon_var_count = 0
         self.imports = defaultdict(set)
         self.temp_if = None
 
         if not inspect.ismodule(module):
-            module = importlib.import_module(module)
+            self.module = importlib.import_module(module)
+        else:
+            self.module = module
 
-        self.module = module
-        self.module_name = module.__name__
+        self.module_name = self.module.__name__
+
+        self.filename = filename
+        self.source = source
 
         # Hy expects these to be present, so we prep the module for Hy
         # compilation.
@@ -431,10 +443,15 @@ class HyASTCompiler(object):
             # nested; so let's re-raise this exception, let's not wrap it in
             # another HyCompileError!
             raise
-        except HyTypeError:
-            raise
+        except HyTypeError as e:
+            reraise(type(e), e, None)
         except Exception as e:
-            raise_empty(HyCompileError, e, sys.exc_info()[2])
+            f_exc = traceback.format_exc()
+            exc_msg = "Internal Compiler Bug 😱\n⤷ {}".format(f_exc)
+            reraise(HyCompileError, HyCompileError(exc_msg), sys.exc_info()[2])
+
+    def _syntax_error(self, message, expr):
+        return HyTypeError(message, self.filename, expr, self.source)
 
     def _compile_collect(self, exprs, with_kwargs=False, dict_display=False,
                          oldpy_unpack=False):
@@ -455,8 +472,10 @@ class HyASTCompiler(object):
 
             if not PY35 and oldpy_unpack and is_unpack("iterable", expr):
                 if oldpy_starargs:
-                    raise HyTypeError(expr, "Pythons < 3.5 allow only one "
-                                            "`unpack-iterable` per call")
+                    raise self._syntax_error(
+                        "Pythons < 3.5 allow only one "
+                        "`unpack-iterable` per call",
+                        expr)
                 oldpy_starargs = self.compile(expr[1])
                 ret += oldpy_starargs
                 oldpy_starargs = oldpy_starargs.force_expr
@@ -472,21 +491,26 @@ class HyASTCompiler(object):
                             expr, arg=None, value=ret.force_expr))
                 elif oldpy_unpack:
                     if oldpy_kwargs:
-                        raise HyTypeError(expr, "Pythons < 3.5 allow only one "
-                                                "`unpack-mapping` per call")
+                        raise self._syntax_error(
+                            "Pythons < 3.5 allow only one "
+                            "`unpack-mapping` per call",
+                            expr)
                     oldpy_kwargs = ret.force_expr
 
             elif with_kwargs and isinstance(expr, HyKeyword):
                 try:
                     value = next(exprs_iter)
                 except StopIteration:
-                    raise HyTypeError(expr,
-                                      "Keyword argument {kw} needs "
-                                      "a value.".format(kw=expr))
+                    raise self._syntax_error(
+                        "Keyword argument {kw} needs "
+                        "a value.".format(kw=expr),
+                        expr)
 
                 if not expr:
-                    raise HyTypeError(expr, "Can't call a function with the "
-                                            "empty keyword")
+                    raise self._syntax_error(
+                        "Can't call a function with the "
+                        "empty keyword",
+                        expr)
 
                 compiled_value = self.compile(value)
                 ret += compiled_value
@@ -527,8 +551,8 @@ class HyASTCompiler(object):
 
         if isinstance(name, Result):
             if not name.is_expr():
-                raise HyTypeError(expr,
-                                  "Can't assign or delete a non-expression")
+                raise self._syntax_error(
+                    "Can't assign or delete a non-expression", expr)
             name = name.expr
 
         if isinstance(name, (ast.Tuple, ast.List)):
@@ -547,9 +571,8 @@ class HyASTCompiler(object):
             new_name = ast.Starred(
                 value=self._storeize(expr, name.value, func))
         else:
-            raise HyTypeError(expr,
-                              "Can't assign or delete a %s" %
-                              type(expr).__name__)
+            raise self._syntax_error(
+                "Can't assign or delete a %s" % type(expr).__name__, expr)
 
         new_name.ctx = func()
         ast.copy_location(new_name, name)
@@ -575,9 +598,8 @@ class HyASTCompiler(object):
             op = unmangle(ast_str(form[0]))
         if level == 0 and op in ("unquote", "unquote-splice"):
             if len(form) != 2:
-                raise HyTypeError(form,
-                                  ("`%s' needs 1 argument, got %s" %
-                                   op, len(form) - 1))
+                raise HyTypeError("`%s' needs 1 argument, got %s" % op, len(form) - 1,
+                                  self.filename, form, self.source)
             return set(), form[1], op == "unquote-splice"
         elif op == "quasiquote":
             level += 1
@@ -629,7 +651,8 @@ class HyASTCompiler(object):
     @special("unpack-iterable", [FORM])
     def compile_unpack_iterable(self, expr, root, arg):
         if not PY3:
-            raise HyTypeError(expr, "`unpack-iterable` isn't allowed here")
+            raise self._syntax_error(
+                "`unpack-iterable` isn't allowed here", expr)
         ret = self.compile(arg)
         ret += asty.Starred(expr, value=ret.force_expr, ctx=ast.Load())
         return ret
@@ -659,7 +682,8 @@ class HyASTCompiler(object):
 
         if cause is not None:
             if not PY3:
-                raise HyTypeError(expr, "raise from only supported in python 3")
+                raise self._syntax_error(
+                    "raise from only supported in python 3", expr)
             cause = self.compile(cause)
             ret += cause
             cause = cause.force_expr
@@ -706,14 +730,12 @@ class HyASTCompiler(object):
 
         # Using (else) without (except) is verboten!
         if orelse and not handlers:
-            raise HyTypeError(
-                expr,
-                "`try' cannot have `else' without `except'")
+            raise self._syntax_error(
+                "`try' cannot have `else' without `except'", expr)
         # Likewise a bare (try) or (try BODY).
         if not (handlers or finalbody):
-            raise HyTypeError(
-                expr,
-                "`try' must have an `except' or `finally' clause")
+            raise self._syntax_error(
+                "`try' must have an `except' or `finally' clause", expr)
 
         returnable = Result(
             expr=asty.Name(expr, id=return_var.id, ctx=ast.Load()),
@@ -963,7 +985,7 @@ class HyASTCompiler(object):
     def compile_decorate_expression(self, expr, name, args):
         decs, fn = args[:-1], self.compile(args[-1])
         if not fn.stmts or not isinstance(fn.stmts[-1], _decoratables):
-            raise HyTypeError(args[-1], "Decorated a non-function")
+            raise self._syntax_error("Decorated a non-function", args[-1])
         decs, ret, _ = self._compile_collect(decs)
         fn.stmts[-1].decorator_list = decs + fn.stmts[-1].decorator_list
         return ret + fn
@@ -1194,8 +1216,9 @@ class HyASTCompiler(object):
                 if (HySymbol('*'), None) in kids:
                     if len(kids) != 1:
                         star = kids[kids.index((HySymbol('*'), None))][0]
-                        raise HyTypeError(star, "* in an import name list "
-                                                "must be on its own")
+                        raise self._syntax_error(
+                            "* in an import name list "
+                            "must be on its own", star)
                 else:
                     assignments = [(k, v or k) for k, v in kids]
 
@@ -1390,15 +1413,14 @@ class HyASTCompiler(object):
         if str_name in (["None"] + (["True", "False"] if PY3 else [])):
             # Python 2 allows assigning to True and False, although
             # this is rarely wise.
-            raise HyTypeError(name,
-                              "Can't assign to `%s'" % str_name)
+            raise self._syntax_error("Can't assign to `%s'" % str_name, name)
 
         result = self.compile(result)
         ld_name = self.compile(name)
 
         if isinstance(ld_name.expr, ast.Call):
-            raise HyTypeError(name,
-                              "Can't assign to a callable: `%s'" % str_name)
+            raise self._syntax_error(
+                "Can't assign to a callable: `%s'" % str_name, name)
 
         if (result.temp_variables
                 and isinstance(name, HySymbol)
@@ -1474,7 +1496,8 @@ class HyASTCompiler(object):
         mandatory, optional, rest, kwonly, kwargs = params
         optional, defaults, ret = self._parse_optional_args(optional)
         if kwonly is not None and not PY3:
-            raise HyTypeError(params, "&kwonly parameters require Python 3")
+            raise self._syntax_error(
+                "&kwonly parameters require Python 3", params)
         kwonly, kw_defaults, ret2 = self._parse_optional_args(kwonly, True)
         ret += ret2
         main_args = mandatory + optional
@@ -1612,7 +1635,29 @@ class HyASTCompiler(object):
     def compile_eval_and_compile(self, expr, root, body):
         new_expr = HyExpression([HySymbol("do").replace(expr[0])]).replace(expr)
 
-        hy_eval(new_expr + body, self.module.__dict__, self.module)
+        try:
+            hy_eval(new_expr + body,
+                    self.module.__dict__,
+                    self.module,
+                    filename=self.filename,
+                    source=self.source)
+        except HyInternalError:
+            # Unexpected "meta" compilation errors need to be treated
+            # like normal (unexpected) compilation errors at this level
+            # (or the compilation level preceding this one).
+            raise
+        except Exception as e:
+            # These could be expected Hy language errors (e.g. syntax errors)
+            # or regular Python runtime errors that do not signify errors in
+            # the compilation *process* (although compilation did technically
+            # fail).
+            # We wrap these exceptions and pass them through.
+            reraise(HyEvalError,
+                    HyEvalError(str(e),
+                                self.filename,
+                                body,
+                                self.source),
+                    sys.exc_info()[2])
 
         return (self._compile_branch(body)
                 if ast_str(root) == "eval_and_compile"
@@ -1627,8 +1672,8 @@ class HyASTCompiler(object):
             return self.compile(expr)
 
         if not expr:
-            raise HyTypeError(
-                expr, "empty expressions are not allowed at top level")
+            raise self._syntax_error(
+                "empty expressions are not allowed at top level", expr)
 
         args = list(expr)
         root = args.pop(0)
@@ -1646,20 +1691,19 @@ class HyASTCompiler(object):
                     sroot in (mangle(","), mangle(".")) or
                     not any(is_unpack("iterable", x) for x in args)):
                 if sroot in _bad_roots:
-                    raise HyTypeError(
-                        expr,
-                        "The special form '{}' is not allowed here".format(root))
+                    raise self._syntax_error(
+                        "The special form '{}' is not allowed here".format(root),
+                        expr)
                 # `sroot` is a special operator. Get the build method and
                 # pattern-match the arguments.
                 build_method, pattern = _special_form_compilers[sroot]
                 try:
                     parse_tree = pattern.parse(args)
                 except NoParseError as e:
-                    raise HyTypeError(
-                        expr[min(e.state.pos + 1, len(expr) - 1)],
+                    raise self._syntax_error(
                         "parse error for special form '{}': {}".format(
-                            root,
-                            e.msg.replace("<EOF>", "end of form")))
+                            root, e.msg.replace("<EOF>", "end of form")),
+                        expr[min(e.state.pos + 1, len(expr) - 1)])
                 return Result() + build_method(
                     self, expr, unmangle(sroot), *parse_tree)
 
@@ -1681,13 +1725,13 @@ class HyASTCompiler(object):
                         FORM +
                         many(FORM)).parse(args)
                 except NoParseError:
-                    raise HyTypeError(
-                        expr, "attribute access requires object")
+                    raise self._syntax_error(
+                        "attribute access requires object", expr)
                 # Reconstruct `args` to exclude `obj`.
                 args = [x for p in kws for x in p] + list(rest)
                 if is_unpack("iterable", obj):
-                    raise HyTypeError(
-                        obj, "can't call a method on an unpacking form")
+                    raise self._syntax_error(
+                        "can't call a method on an unpacking form", obj)
                 func = self.compile(HyExpression(
                     [HySymbol(".").replace(root), obj] +
                     attrs))
@@ -1725,16 +1769,18 @@ class HyASTCompiler(object):
             glob, local = symbol.rsplit(".", 1)
 
             if not glob:
-                raise HyTypeError(symbol, 'cannot access attribute on '
-                                          'anything other than a name '
-                                          '(in order to get attributes of '
-                                          'expressions, use '
-                                          '`(. <expression> {attr})` or '
-                                          '`(.{attr} <expression>)`)'.format(
-                                              attr=local))
+                raise self._syntax_error(
+                    'cannot access attribute on '
+                    'anything other than a name '
+                    '(in order to get attributes of '
+                    'expressions, use '
+                    '`(. <expression> {attr})` or '
+                    '`(.{attr} <expression>)`)'.format(attr=local),
+                    symbol)
 
             if not local:
-                raise HyTypeError(symbol, 'cannot access empty attribute')
+                raise self._syntax_error(
+                    'cannot access empty attribute', symbol)
 
             glob = HySymbol(glob).replace(symbol)
             ret = self.compile_symbol(glob)
@@ -1802,8 +1848,13 @@ def get_compiler_module(module=None, compiler=None, calling_frame=False):
 
 
 def hy_eval(hytree, locals=None, module=None, ast_callback=None,
-            compiler=None):
+            compiler=None, filename='<string>', source=None):
     """Evaluates a quoted expression and returns the value.
+
+    If you're evaluating hand-crafted AST trees, make sure the line numbers
+    are set properly.  Try `fix_missing_locations` and related functions in the
+    Python `ast` library.
+
     Examples
     --------
        => (eval '(print "Hello World"))
@@ -1816,8 +1867,8 @@ def hy_eval(hytree, locals=None, module=None, ast_callback=None,
 
     Parameters
     ----------
-    hytree: a Hy expression tree
-        Source code to parse.
+    hytree: HyObject
+        The Hy AST object to evaluate.
 
     locals: dict, optional
         Local environment in which to evaluate the Hy tree.  Defaults to the
@@ -1839,6 +1890,19 @@ def hy_eval(hytree, locals=None, module=None, ast_callback=None,
         An existing Hy compiler to use for compilation.  Also serves as
         the `module` value when given.
 
+    filename: str, optional
+        The filename corresponding to the source for `tree`.  This will be
+        overridden by the `filename` field of `tree`, if any; otherwise, it
+        defaults to "<string>".  When `compiler` is given, its `filename` field
+        value is always used.
+
+    source: str, optional
+        A string containing the source code for `tree`.  This will be
+        overridden by the `source` field of `tree`, if any; otherwise,
+        if `None`, an attempt will be made to obtain it from the module given by
+        `module`.  When `compiler` is given, its `source` field value is always
+        used.
+
     Returns
     -------
     out : Result of evaluating the Hy compiled tree.
@@ -1853,36 +1917,53 @@ def hy_eval(hytree, locals=None, module=None, ast_callback=None,
     if not isinstance(locals, dict):
         raise TypeError("Locals must be a dictionary")
 
-    _ast, expr = hy_compile(hytree, module=module, get_expr=True,
-                            compiler=compiler)
+    # Does the Hy AST object come with its own information?
+    filename = getattr(hytree, 'filename', filename) or '<string>'
+    source = getattr(hytree, 'source', source)
 
-    # Spoof the positions in the generated ast...
-    for node in ast.walk(_ast):
-        node.lineno = 1
-        node.col_offset = 1
-
-    for node in ast.walk(expr):
-        node.lineno = 1
-        node.col_offset = 1
+    _ast, expr = hy_compile(hytree, module, get_expr=True,
+                            compiler=compiler, filename=filename,
+                            source=source)
 
     if ast_callback:
         ast_callback(_ast, expr)
 
-    globals = module.__dict__
-
     # Two-step eval: eval() the body of the exec call
-    eval(ast_compile(_ast, "<eval_body>", "exec"), globals, locals)
+    eval(ast_compile(_ast, filename, "exec"),
+         module.__dict__, locals)
 
     # Then eval the expression context and return that
-    return eval(ast_compile(expr, "<eval>", "eval"), globals, locals)
+    return eval(ast_compile(expr, filename, "eval"),
+                module.__dict__, locals)
 
 
-def hy_compile(tree, module=None, root=ast.Module, get_expr=False,
-               compiler=None):
-    """Compile a Hy tree into a Python AST tree.
+def _module_file_source(module_name, filename, source):
+    """Try to obtain missing filename and source information from a module name
+    without actually loading the module.
+    """
+    if filename is None or source is None:
+        mod_loader = pkgutil.get_loader(module_name)
+        if mod_loader:
+            if filename is None:
+                filename = mod_loader.get_filename(module_name)
+            if source is None:
+                source = mod_loader.get_source(module_name)
+
+    # We need a non-None filename.
+    filename = filename or '<string>'
+
+    return filename, source
+
+
+def hy_compile(tree, module, root=ast.Module, get_expr=False,
+               compiler=None, filename=None, source=None):
+    """Compile a HyObject tree into a Python AST Module.
 
     Parameters
     ----------
+    tree: HyObject
+        The Hy AST object to compile.
+
     module: str or types.ModuleType, optional
         Module, or name of the module, in which the Hy tree is evaluated.
         The module associated with `compiler` takes priority over this value.
@@ -1897,18 +1978,43 @@ def hy_compile(tree, module=None, root=ast.Module, get_expr=False,
         An existing Hy compiler to use for compilation.  Also serves as
         the `module` value when given.
 
+    filename: str, optional
+        The filename corresponding to the source for `tree`.  This will be
+        overridden by the `filename` field of `tree`, if any; otherwise, it
+        defaults to "<string>".  When `compiler` is given, its `filename` field
+        value is always used.
+
+    source: str, optional
+        A string containing the source code for `tree`.  This will be
+        overridden by the `source` field of `tree`, if any; otherwise,
+        if `None`, an attempt will be made to obtain it from the module given by
+        `module`.  When `compiler` is given, its `source` field value is always
+        used.
+
     Returns
     -------
     out : A Python AST tree
     """
     module = get_compiler_module(module, compiler, False)
 
+    if isinstance(module, string_types):
+        if module.startswith('<') and module.endswith('>'):
+            module = types.ModuleType(module)
+        else:
+            module = importlib.import_module(ast_str(module, piecewise=True))
+
+    if not inspect.ismodule(module):
+        raise TypeError('Invalid module type: {}'.format(type(module)))
+
+    filename = getattr(tree, 'filename', filename)
+    source = getattr(tree, 'source', source)
+
     tree = wrap_value(tree)
     if not isinstance(tree, HyObject):
-        raise HyCompileError("`tree` must be a HyObject or capable of "
-                             "being promoted to one")
+        raise TypeError("`tree` must be a HyObject or capable of "
+                        "being promoted to one")
 
-    compiler = compiler or HyASTCompiler(module)
+    compiler = compiler or HyASTCompiler(module, filename=filename, source=source)
     result = compiler.compile(tree)
     expr = result.force_expr
 
@@ -1919,9 +2025,9 @@ def hy_compile(tree, module=None, root=ast.Module, get_expr=False,
 
     # Pull out a single docstring and prepend to the resulting body.
     if (len(result.stmts) > 0 and
-        issubclass(root, ast.Module) and
-        isinstance(result.stmts[0], ast.Expr) and
-        isinstance(result.stmts[0].value, ast.Str)):
+            issubclass(root, ast.Module) and
+            isinstance(result.stmts[0], ast.Expr) and
+            isinstance(result.stmts[0].value, ast.Str)):
 
         body += [result.stmts.pop(0)]
 

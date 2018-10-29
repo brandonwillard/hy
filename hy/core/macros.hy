@@ -34,8 +34,8 @@ or last argument."
 If more than three parameters are given, the remaining args are k/v pairs to
 be associated in pairs."
   (if (odd? (len other-kvs))
-    (macro-error (last other-kvs)
-                 "`assoc` takes an odd number of arguments"))
+    (macro-error "`assoc` takes an odd number of arguments"
+                 (last other-kvs)))
   (setv c (if other-kvs
             (gensym "c")
             coll))
@@ -95,7 +95,7 @@ used as the result."
      (defn check-branch [branch]
        "check `cond` branch for validity, return the corresponding `if` expr"
        (if (not (= (type branch) HyList))
-         (macro-error branch "cond branches need to be a list"))
+         (macro-error "cond branches need to be a list" branch))
        (if (< (len branch) 2)
          (do
            (setv g (gensym))

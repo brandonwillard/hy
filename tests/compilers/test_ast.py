@@ -10,7 +10,7 @@ from hy.models import HyObject
 from hy.compiler import hy_compile, hy_eval
 from hy.errors import HyCompileError, HyTypeError
 from hy.lex import hy_parse
-from hy.lex.exceptions import LexException
+from hy.lex.exceptions import LexException, PrematureEndOfInput
 from hy._compat import PY3
 
 import ast
@@ -310,7 +310,7 @@ import a dotted name."""
 def test_ast_no_pointless_imports():
     def contains_import_from(code):
         return any([isinstance(node, ast.ImportFrom)
-                   for node in can_compile(code).body])
+                    for node in can_compile(code).body])
     # `reduce` is a builtin in Python 2, but not Python 3.
     # The version of `map` that returns an iterator is a builtin in
     # Python 3, but not Python 2.
@@ -474,7 +474,7 @@ def test_lambda_list_keywords_kwonly():
     else:
         exception = cant_compile(kwonly_demo)
         assert isinstance(exception, HyTypeError)
-        message, = exception.args
+        message = exception.args[0]
         assert message == "&kwonly parameters require Python 3"
 
 
@@ -547,7 +547,7 @@ def test_compile_error():
 
 def test_for_compile_error():
     """Ensure we get compile error in tricky 'for' cases"""
-    with pytest.raises(LexException) as excinfo:
+    with pytest.raises(PrematureEndOfInput) as excinfo:
         can_compile("(fn [] (for)")
     assert excinfo.value.message == "Premature end of input"
 

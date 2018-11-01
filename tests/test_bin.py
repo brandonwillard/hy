@@ -6,7 +6,6 @@
 
 import os
 import re
-import sys
 import shlex
 import subprocess
 
@@ -531,7 +530,7 @@ def test_bin_hy_tracebacks():
     assert output.startswith('=> ')
     error_lines = error.splitlines()
     if PY3:
-        output = error_lines[3]
+        output = error_lines[2]
         expected = "hy.errors.HyRequireError: No module named 'not_a_real_module'"
     else:
         output = error_lines[-3]
@@ -546,14 +545,19 @@ def test_bin_hy_tracebacks():
     #   SyntaxError: EOL while scanning string literal
     _, error = run_cmd('hy -c "(print \\""', expect=1)
     error_lines = error.splitlines()
-    expected = ['  File "<string>", line 1',
+    expected = ['Traceback (most recent call last):',
+                '  File "<string>", line 1',
                 '    (print "',
                 '           ^']
     if PY3:
         expected += ['hy.lex.exceptions.PrematureEndOfInput: Partial string literal']
     else:
         expected += ['PrematureEndOfInput: Partial string literal']
-    assert error_lines == expected
+
+    assert error_lines[0] == expected[0]
+    assert (error_lines[1] == expected[1] or
+            re.match('  File "string-[0-9a-f]+", line 1', error_lines[1]))
+    assert error_lines[2:] == expected[2:]
 
     # Modeled after
     #   > python -i -c "print('"
@@ -563,10 +567,13 @@ def test_bin_hy_tracebacks():
     #   SyntaxError: EOL while scanning string literal
     #   >>>
     output, error = run_cmd('hy -i "(print \\""')
-    assert output.startswith('=> ')
+    assert output.splitlines()[-1].startswith('=> ')
     error_lines = error.splitlines()
-    assert error_lines[:3] == expected[:-1:1]
-    assert error_lines[3].endswith(expected[-1])
+    assert error_lines[0] == expected[0]
+    assert (error_lines[1] == expected[1] or
+            re.match('  File "string-[0-9a-f]+", line 1', error_lines[1]))
+    assert error_lines[2:4] == expected[2:4]
+    assert error_lines[4].endswith(expected[-1])
 
     # Modeled after
     #   > python -c 'print(a)'
